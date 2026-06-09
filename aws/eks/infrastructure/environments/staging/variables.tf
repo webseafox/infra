@@ -13,6 +13,11 @@ variable "aws_region" {
   type        = string
 }
 
+variable "aws_assume_role_arn" {
+  description = "IAM Role ARN used by Terraform to access the target AWS account."
+  type        = string
+}
+
 variable "cluster_version" {
   description = "EKS Kubernetes version."
   type        = string

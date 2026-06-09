@@ -1,6 +1,7 @@
 project_name = "platform"
 environment  = "dev"
 aws_region   = "us-east-1"
+aws_assume_role_arn = "arn:aws:iam::123456789012:role/TerraformDeployRole"
 
 cluster_version = "1.30"
 vpc_cidr        = "10.30.0.0/16"
