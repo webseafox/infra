@@ -1,5 +1,5 @@
 pm_api_url          = "https://proxmox.example.com:8006/api2/json"
-pm_api_token_id     = "terraform@pve!terraform"
+pm_api_token_id     = "root@pam!terraform"
 pm_api_token_secret = "REPLACE_ME"
 pm_tls_insecure     = true
 

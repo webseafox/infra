@@ -69,7 +69,7 @@ Este projeto usa autenticação por API Token no provider Telmate/proxmox.
 ### Formato para Terraform
 
 No terraform.tfvars:
-- pm_api_token_id = "terraform@pve!terraform"
+- pm_api_token_id = "root@pam!terraform"
 - pm_api_token_secret = "SEU_SECRET_AQUI"
 
 O formato de pm_api_token_id é:
@@ -79,7 +79,7 @@ O formato de pm_api_token_id é:
 
 Exemplo com curl:
 
-curl -k -H "Authorization: PVEAPIToken=terraform@pve!terraform=SEU_SECRET_AQUI" \
+curl -k -H "Authorization: PVEAPIToken=root@pam!terraform=SEU_SECRET_AQUI" \
   https://SEU_PROXMOX:8006/api2/json/version
 
 Se retornar versão do Proxmox em JSON, o token está funcional.
@@ -89,6 +89,7 @@ Se retornar versão do Proxmox em JSON, o token está funcional.
 - Evite commitar secrets reais no git
 - Prefira exportar segredo via variável de ambiente:
   - export TF_VAR_pm_api_token_secret="SEU_SECRET_AQUI"
+- Em produção, prefira usuário de automação com menor privilégio em vez de root
 - Dê apenas permissões mínimas necessárias para o Terraform
 
 ## 3) Como usar Terraform neste projeto
