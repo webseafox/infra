@@ -27,6 +27,28 @@ need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 DRY_RUN=0
 
+# ========================= usuário real (mesmo sob sudo) =========================
+# Quando o script é rodado com "sudo ./install-dev-cli-tools.sh", $HOME e $USER
+# passam a apontar para root. Instaladores por-usuário (Claude, Kimi, zsh/omz)
+# precisam rodar como o usuário real, senão instalam em /root e "somem" depois.
+if [[ "$EUID" -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  REAL_USER="$SUDO_USER"
+  REAL_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  warn "Script rodando com sudo — instalações por-usuário (Claude, Kimi, zsh) serão feitas para '$REAL_USER' ($REAL_HOME), não para root."
+else
+  REAL_USER="$USER"
+  REAL_HOME="$HOME"
+fi
+
+# roda um comando como o usuário real (via sudo -u se o script estiver como root)
+run_as_real_user() {
+  if [[ "$EUID" -eq 0 && "$REAL_USER" != "root" ]]; then
+    sudo -u "$REAL_USER" -H bash -c "$1"
+  else
+    bash -c "$1"
+  fi
+}
+
 # ========================= pré-checagens =========================
 if ! need_cmd apt-get; then
   err "Este script é para Ubuntu/Debian (apt-get não encontrado). Abortando."
@@ -111,7 +133,7 @@ install_docker() {
     return 0
   fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    dry "Instalaria Docker Engine: repo apt oficial download.docker.com, pacotes docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin, adicionaria $USER ao grupo docker, habilitaria o serviço."
+    dry "Instalaria Docker Engine: repo apt oficial download.docker.com, pacotes docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin, adicionaria $REAL_USER ao grupo docker, habilitaria o serviço."
     return 0
   fi
 
@@ -127,7 +149,7 @@ install_docker() {
   APT_UPDATED=0; apt_update_once
   sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-  sudo usermod -aG docker "$USER" || true
+  sudo usermod -aG docker "$REAL_USER" || true
 
   if [[ -d /run/systemd/system ]]; then
     sudo systemctl enable --now docker
@@ -142,16 +164,16 @@ install_docker() {
 
 # ========================= Claude Code CLI =========================
 install_claude_code() {
-  if need_cmd claude; then
-    ok "Claude Code CLI já instalado: $(claude --version 2>/dev/null || echo 'versão desconhecida')"
+  if run_as_real_user "command -v claude" >/dev/null 2>&1; then
+    ok "Claude Code CLI já instalado: $(run_as_real_user "claude --version" 2>/dev/null || echo 'versão desconhecida')"
     return 0
   fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
     dry "Instalaria Claude Code CLI via instalador nativo (curl -fsSL https://claude.ai/install.sh | bash)."
     return 0
   fi
-  log "Instalando Claude Code CLI (instalador nativo)..."
-  curl -fsSL https://claude.ai/install.sh | bash
+  log "Instalando Claude Code CLI (instalador nativo) para '$REAL_USER'..."
+  run_as_real_user "curl -fsSL https://claude.ai/install.sh | bash"
   warn "Reinicie o shell (ou 'source ~/.bashrc') para o comando 'claude' entrar no PATH."
 }
 
@@ -233,58 +255,69 @@ install_oc_cli() {
 
 # ========================= Kimi Code CLI =========================
 install_kimi_cli() {
-  if need_cmd kimi; then
-    ok "Kimi Code CLI já instalado: $(kimi --version 2>/dev/null || echo 'versão desconhecida')"
+  if run_as_real_user "command -v kimi" >/dev/null 2>&1; then
+    ok "Kimi Code CLI já instalado: $(run_as_real_user "kimi --version" 2>/dev/null || echo 'versão desconhecida')"
     return 0
   fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
     dry "Instalaria Kimi Code CLI via curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"
     return 0
   fi
-  log "Instalando Kimi Code CLI..."
-  curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+  log "Instalando Kimi Code CLI para '$REAL_USER'..."
+  run_as_real_user "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"
   warn "Reinicie o shell (ou 'source ~/.zshrc'/'source ~/.bashrc') para o comando 'kimi' entrar no PATH."
 }
 
 # ========================= Zsh + Oh My Zsh + Powerlevel10k =========================
 install_zsh_omz() {
-  local zsh_custom="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
+  local zsh_custom="${ZSH_CUSTOM:-$REAL_HOME/.oh-my-zsh/custom}"
 
-  if need_cmd zsh && [[ -d "$HOME/.oh-my-zsh" && -d "$zsh_custom/themes/powerlevel10k" ]]; then
+  if need_cmd zsh && [[ -d "$REAL_HOME/.oh-my-zsh" && -d "$zsh_custom/themes/powerlevel10k" ]]; then
     ok "Zsh + Oh My Zsh + Powerlevel10k já parecem instalados."
     return 0
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    dry "Instalaria zsh, definiria como shell padrão, instalaria Oh My Zsh (modo não-interativo), tema Powerlevel10k e plugins zsh-autosuggestions/zsh-syntax-highlighting, e ajustaria ~/.zshrc (ZSH_THEME e plugins=)."
+    dry "Instalaria zsh, definiria como shell padrão, instalaria Oh My Zsh (modo não-interativo), tema Powerlevel10k e plugins zsh-autosuggestions/zsh-syntax-highlighting, e ajustaria ~/.zshrc (ZSH_THEME e plugins=) para '$REAL_USER'."
     return 0
   fi
 
   log "Instalando zsh..."
   sudo apt-get install -y zsh
 
-  if [[ "$(basename "${SHELL:-}")" != "zsh" ]]; then
-    sudo chsh -s "$(command -v zsh)" "$USER"
+  local user_shell; user_shell="$(getent passwd "$REAL_USER" | cut -d: -f7)"
+  if [[ "$(basename "${user_shell:-}")" != "zsh" ]]; then
+    sudo chsh -s "$(command -v zsh)" "$REAL_USER"
     ok "Shell padrão alterado para zsh (efetivo no próximo login)."
   else
     ok "zsh já é o shell padrão."
   fi
 
-  if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
-    log "Instalando Oh My Zsh (modo não-interativo)..."
-    RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+  if [[ ! -d "$REAL_HOME/.oh-my-zsh" ]]; then
+    log "Instalando Oh My Zsh (modo não-interativo) para '$REAL_USER'..."
+    run_as_real_user "RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)\" '' --unattended"
   else
     ok "Oh My Zsh já instalado."
   fi
 
-  clone_if_missing https://github.com/romkatv/powerlevel10k.git "$zsh_custom/themes/powerlevel10k"
-  clone_if_missing https://github.com/zsh-users/zsh-autosuggestions "$zsh_custom/plugins/zsh-autosuggestions"
-  clone_if_missing https://github.com/zsh-users/zsh-syntax-highlighting "$zsh_custom/plugins/zsh-syntax-highlighting"
+  local repo dest
+  for repo_dest in \
+    "https://github.com/romkatv/powerlevel10k.git|$zsh_custom/themes/powerlevel10k" \
+    "https://github.com/zsh-users/zsh-autosuggestions|$zsh_custom/plugins/zsh-autosuggestions" \
+    "https://github.com/zsh-users/zsh-syntax-highlighting|$zsh_custom/plugins/zsh-syntax-highlighting"
+  do
+    repo="${repo_dest%%|*}"; dest="${repo_dest#*|}"
+    if [[ -d "$dest" ]]; then
+      ok "Já existe: $dest"
+    else
+      run_as_real_user "mkdir -p '$(dirname "$dest")' && git clone --depth=1 '$repo' '$dest'"
+    fi
+  done
 
-  if [[ -f "$HOME/.zshrc" ]]; then
-    sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$HOME/.zshrc"
-    sed -i 's|^plugins=.*|plugins=(git zsh-autosuggestions zsh-syntax-highlighting)|' "$HOME/.zshrc"
+  if [[ -f "$REAL_HOME/.zshrc" ]]; then
+    sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$REAL_HOME/.zshrc"
+    sed -i 's|^plugins=.*|plugins=(git zsh-autosuggestions zsh-syntax-highlighting)|' "$REAL_HOME/.zshrc"
+    [[ "$EUID" -eq 0 && "$REAL_USER" != "root" ]] && chown "$REAL_USER" "$REAL_HOME/.zshrc"
     ok "~/.zshrc atualizado (tema e plugins)."
   else
     warn "~/.zshrc não encontrado — ajuste ZSH_THEME e plugins manualmente depois de abrir o zsh."
@@ -348,12 +381,12 @@ print_summary() {
     [[ "${SELECTED[$t]:-0}" -eq 1 ]] || continue
     case "$t" in
       docker)  need_cmd docker  && echo "  Docker:  $(docker --version)"            || echo "  Docker:  não encontrado" ;;
-      claude)  need_cmd claude  && echo "  Claude:  $(claude --version 2>/dev/null)" || echo "  Claude:  não encontrado (reinicie o shell)" ;;
+      claude)  run_as_real_user "command -v claude" >/dev/null 2>&1 && echo "  Claude:  $(run_as_real_user "claude --version" 2>/dev/null)" || echo "  Claude:  não encontrado (reinicie o shell)" ;;
       copilot) need_cmd copilot && echo "  Copilot: $(copilot --version 2>/dev/null)" || echo "  Copilot: não encontrado" ;;
       az)      need_cmd az      && echo "  Azure:   $(az --version 2>/dev/null | head -n1)" || echo "  Azure:   não encontrado" ;;
       aws)     need_cmd aws     && echo "  AWS:     $(aws --version 2>/dev/null)"    || echo "  AWS:     não encontrado" ;;
       oc)      need_cmd oc      && echo "  oc:      $(oc version --client 2>/dev/null | head -n1)" || echo "  oc:      não encontrado" ;;
-      kimi)    need_cmd kimi    && echo "  Kimi:    $(kimi --version 2>/dev/null)"   || echo "  Kimi:    não encontrado (reinicie o shell)" ;;
+      kimi)    run_as_real_user "command -v kimi" >/dev/null 2>&1 && echo "  Kimi:    $(run_as_real_user "kimi --version" 2>/dev/null)" || echo "  Kimi:    não encontrado (reinicie o shell)" ;;
       zsh)     need_cmd zsh     && echo "  Zsh:     $(zsh --version)"               || echo "  Zsh:     não encontrado" ;;
     esac
   done
