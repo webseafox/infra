@@ -223,6 +223,181 @@ install_kimi_cli() {
   run_cmd "npm install -g '$pkg'"
 }
 
+# Nunca deixa este helper propagar falha para o "set -e" do script: se a API do
+# GitHub estiver indisponível/rate-limited, deve degradar para string vazia, não
+# derrubar o instalador inteiro.
+github_latest_asset_url() {
+  local repo="$1" pattern="$2" out
+  out="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+    | jq -r --arg pat "$pattern" '[.assets[] | select(.name | test($pat))][0].browser_download_url // empty' 2>/dev/null)" || out=""
+  printf '%s' "$out"
+}
+
+# Instala a config zero-plugin nvim_native (https://github.com/smnatale/nvim_native).
+# Manual de uso e checklist pós-instalação: NEOVIM.md neste repositório.
+install_neovim() {
+  local arch; arch="$(uname -m)"
+
+  local nvim_ok=0
+  if need_cmd nvim; then
+    local ver vmajor vminor
+    ver="$(nvim --version | head -n1 | sed -E 's/^NVIM v//')"
+    vmajor="$(echo "$ver" | cut -d. -f1)"; vminor="$(echo "$ver" | cut -d. -f2)"
+    if [[ "$vmajor" -gt 0 || ( "$vmajor" -eq 0 && "$vminor" -ge 11 ) ]]; then
+      nvim_ok=1
+    fi
+  fi
+
+  if [[ "$nvim_ok" -eq 1 ]]; then
+    echo "Neovim já atende ao requisito (>=0.11): $(nvim --version | head -n1)"
+  else
+    echo "Instalando Neovim (binário oficial, >=0.11 — necessário para vim.lsp.enable())..."
+    local asset_pattern=""
+    case "$arch" in
+      x86_64)  asset_pattern='^nvim-linux-x86_64\.tar\.gz$|^nvim-linux64\.tar\.gz$' ;;
+      aarch64) asset_pattern='^nvim-linux-arm64\.tar\.gz$' ;;
+      *) echo "Arquitetura $arch não suportada para download automático do Neovim." ;;
+    esac
+    if [[ -n "$asset_pattern" ]]; then
+      local url; url="$(github_latest_asset_url "neovim/neovim" "$asset_pattern")"
+      if [[ -z "$url" ]]; then
+        echo "Não encontrei asset do Neovim para $arch (API do GitHub indisponível ou rate-limited). Instale manualmente: https://github.com/neovim/neovim/releases"
+      elif [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "[DRY-RUN] baixaria $url e instalaria em /opt/nvim (symlink /usr/local/bin/nvim)"
+      else
+        local tmp_dir; tmp_dir="$(mktemp -d)"
+        if curl -fsSL "$url" -o "$tmp_dir/nvim.tar.gz" && tar -xzf "$tmp_dir/nvim.tar.gz" -C "$tmp_dir"; then
+          local extracted_dir; extracted_dir="$(find "$tmp_dir" -maxdepth 1 -mindepth 1 -type d -name 'nvim-linux*' | head -n1)"
+          if [[ -n "$extracted_dir" ]]; then
+            sudo rm -rf /opt/nvim
+            sudo mv "$extracted_dir" /opt/nvim
+            sudo ln -sf /opt/nvim/bin/nvim /usr/local/bin/nvim
+          else
+            echo "Falha ao extrair o pacote do Neovim."
+          fi
+        else
+          echo "Falha ao baixar/extrair Neovim de $url"
+        fi
+        rm -rf "$tmp_dir"
+      fi
+    fi
+  fi
+
+  if need_cmd rg; then
+    echo "ripgrep já instalado: $(rg --version | head -n1)"
+  else
+    echo "Instalando ripgrep..."
+    run_cmd "sudo apt-get install -y ripgrep" || echo "Falha ao instalar ripgrep."
+  fi
+
+  if need_cmd lua-language-server; then
+    echo "lua-language-server já instalado."
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[DRY-RUN] sudo apt-get install -y lua-language-server (fallback: binário do GitHub em /opt/lua-language-server)"
+  else
+    if ! sudo apt-get install -y lua-language-server 2>/dev/null; then
+      local lls_pattern="" lls_url=""
+      case "$arch" in
+        x86_64)  lls_pattern='linux-x64\.tar\.gz$' ;;
+        aarch64) lls_pattern='linux-arm64\.tar\.gz$|linux-aarch64\.tar\.gz$' ;;
+      esac
+      if [[ -n "$lls_pattern" ]]; then
+        lls_url="$(github_latest_asset_url "LuaLS/lua-language-server" "$lls_pattern")"
+      fi
+      if [[ -n "$lls_url" ]]; then
+        local tmp_dir; tmp_dir="$(mktemp -d)"
+        if curl -fsSL "$lls_url" -o "$tmp_dir/lls.tar.gz"; then
+          sudo mkdir -p /opt/lua-language-server
+          sudo tar -xzf "$tmp_dir/lls.tar.gz" -C /opt/lua-language-server
+          sudo ln -sf /opt/lua-language-server/bin/lua-language-server /usr/local/bin/lua-language-server
+        else
+          echo "Falha ao baixar lua-language-server de $lls_url"
+        fi
+        rm -rf "$tmp_dir"
+      else
+        echo "Não consegui instalar lua-language-server automaticamente. LSP de Lua não vai funcionar até instalar manualmente."
+      fi
+    fi
+  fi
+
+  if need_cmd stylua; then
+    echo "stylua já instalado: $(stylua --version)"
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[DRY-RUN] baixaria stylua do GitHub para /usr/local/bin/stylua"
+  else
+    local st_pattern="" st_url=""
+    case "$arch" in
+      x86_64)  st_pattern='linux-x86_64\.zip$' ;;
+      aarch64) st_pattern='linux-aarch64\.zip$' ;;
+    esac
+    if [[ -n "$st_pattern" ]]; then
+      st_url="$(github_latest_asset_url "JohnnyMorganz/StyLua" "$st_pattern")"
+    fi
+    if [[ -n "$st_url" ]]; then
+      local tmp_dir; tmp_dir="$(mktemp -d)"
+      if curl -fsSL "$st_url" -o "$tmp_dir/stylua.zip"; then
+        unzip -q "$tmp_dir/stylua.zip" -d "$tmp_dir"
+        sudo install -m 0755 "$tmp_dir/stylua" /usr/local/bin/stylua
+      else
+        echo "Falha ao baixar stylua de $st_url"
+      fi
+      rm -rf "$tmp_dir"
+    else
+      echo "Não consegui instalar stylua automaticamente. Formatação de .lua cairá no fallback do LSP."
+    fi
+  fi
+
+  ensure_nodejs
+  if need_cmd tsgo; then
+    echo "tsgo já instalado."
+  else
+    echo "Instalando tsgo (@typescript/native-preview)..."
+    run_cmd "sudo npm install -g @typescript/native-preview" || echo "Falha ao instalar tsgo."
+  fi
+  if need_cmd prettier; then
+    echo "prettier já instalado."
+  else
+    echo "Instalando prettier..."
+    run_cmd "sudo npm install -g prettier" || echo "Falha ao instalar prettier."
+  fi
+
+  local cfg_dir="$HOME/.config/nvim"
+  local cfg_is_nvim_native=0
+  if [[ -d "$cfg_dir/.git" ]]; then
+    if git -C "$cfg_dir" remote get-url origin 2>/dev/null | grep -q "smnatale/nvim_native"; then
+      cfg_is_nvim_native=1
+    fi
+  fi
+
+  if [[ "$cfg_is_nvim_native" -eq 1 ]]; then
+    echo "Config do Neovim (nvim_native) já está em $cfg_dir."
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[DRY-RUN] clonaria https://github.com/smnatale/nvim_native para $cfg_dir (com backup de config existente, se houver)"
+  else
+    if [[ -d "$cfg_dir" ]]; then
+      local backup="$cfg_dir.bak-$(date +%Y%m%d%H%M%S)"
+      echo "Config existente encontrada em $cfg_dir — movendo para $backup antes de instalar."
+      mv "$cfg_dir" "$backup"
+    fi
+    mkdir -p "$(dirname "$cfg_dir")"
+    git clone --depth=1 https://github.com/smnatale/nvim_native.git "$cfg_dir" || echo "Falha ao clonar a config do Neovim."
+  fi
+
+  # a config referencia o colorscheme "catppuccin", que não é nativo nem incluído no
+  # repo — instalado como pacote nativo do Vim (sem plugin manager). Ver NEOVIM.md.
+  local pack_dir="$cfg_dir/pack/colors/start/catppuccin.nvim"
+  if [[ -d "$pack_dir" ]]; then
+    echo "Colorscheme catppuccin já instalado (pacote nativo)."
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[DRY-RUN] clonaria catppuccin/nvim como pacote nativo em $pack_dir"
+  elif [[ -d "$cfg_dir" ]]; then
+    mkdir -p "$(dirname "$pack_dir")"
+    git clone --depth=1 https://github.com/catppuccin/nvim.git "$pack_dir" || echo "Falha ao clonar o colorscheme catppuccin."
+  fi
+
+  echo "Manual de uso e checklist pós-instalação: NEOVIM.md neste repositório."
+}
+
 install_zsh_oh_my_zsh() {
   if need_cmd zsh; then
     echo "zsh já instalado: $(zsh --version)"
@@ -309,6 +484,7 @@ ask_yes_no "Instalar Azure CLI (az)?" Y && install_azure_cli
 ask_yes_no "Instalar AWS CLI (aws)?" Y && install_aws_cli
 ask_yes_no "Instalar OpenShift CLI (oc)?" Y && install_oc_cli
 ask_yes_no "Instalar Kimi CLI?" Y && install_kimi_cli
+ask_yes_no "Instalar Neovim (config zero-plugin nvim_native)?" Y && install_neovim
 
 echo
 echo "Concluído."
@@ -318,5 +494,6 @@ echo "  az login"
 echo "  aws configure"
 echo "  oc login <URL_DO_CLUSTER>"
 echo "  claude login"
+echo "  nvim            (manual e checklist pós-instalação em NEOVIM.md)"
 echo
 echo "Se Docker acabou de ser instalado, reinicie o terminal (ou rode: newgrp docker)."

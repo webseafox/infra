@@ -2,7 +2,8 @@
 #
 # Instalador interativo de ferramentas de dev para WSL Ubuntu:
 #   Docker, Claude Code CLI, GitHub Copilot CLI, Azure CLI, AWS CLI, oc CLI,
-#   Kimi Code CLI, Zsh + Oh My Zsh + Powerlevel10k
+#   Kimi Code CLI, Neovim (config zero-plugin nvim_native, ver NEOVIM.md),
+#   Zsh + Oh My Zsh + Powerlevel10k
 #
 # Suporta modo DRY-RUN: mostra o que seria feito, sem alterar nada, com opção
 # de rodar a instalação de verdade logo em seguida.
@@ -268,6 +269,211 @@ install_kimi_cli() {
   warn "Reinicie o shell (ou 'source ~/.zshrc'/'source ~/.bashrc') para o comando 'kimi' entrar no PATH."
 }
 
+# ========================= Neovim (config zero-plugin nvim_native) =========================
+# https://github.com/smnatale/nvim_native — manual completo em NEOVIM.md
+
+github_release_asset_url() {
+  local repo="$1" pattern="$2"
+  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
+    | jq -r --arg pat "$pattern" '[.assets[] | select(.name | test($pat))][0].browser_download_url // empty'
+}
+
+nvim_version_ok() {
+  need_cmd nvim || return 1
+  local ver vmajor vminor
+  ver="$(nvim --version | head -n1 | sed -E 's/^NVIM v//')"
+  vmajor="$(echo "$ver" | cut -d. -f1)"; vminor="$(echo "$ver" | cut -d. -f2)"
+  [[ "$vmajor" -gt 0 || ( "$vmajor" -eq 0 && "$vminor" -ge 11 ) ]]
+}
+
+install_neovim_bin() {
+  if nvim_version_ok; then
+    ok "Neovim já atende ao requisito (>=0.11): $(nvim --version | head -n1)"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    dry "Baixaria o binário oficial mais recente do Neovim (>=0.11) do GitHub e instalaria em /opt/nvim (symlink em /usr/local/bin/nvim)."
+    return 0
+  fi
+
+  local asset_pattern
+  case "$ARCH_UNAME" in
+    x86_64)  asset_pattern='^nvim-linux-x86_64\.tar\.gz$|^nvim-linux64\.tar\.gz$' ;;
+    aarch64) asset_pattern='^nvim-linux-arm64\.tar\.gz$' ;;
+    *) err "Arquitetura $ARCH_UNAME não suportada para download automático do Neovim."; return 1 ;;
+  esac
+
+  log "Buscando última release do Neovim (arch: $ARCH_UNAME)..."
+  local url; url="$(github_release_asset_url "neovim/neovim" "$asset_pattern")"
+  if [[ -z "$url" ]]; then
+    err "Não encontrei um asset do Neovim para $ARCH_UNAME na última release. Instale manualmente: https://github.com/neovim/neovim/releases"
+    return 1
+  fi
+
+  local tmp_dir; tmp_dir="$(mktemp -d)"
+  log "Baixando Neovim de $url..."
+  if curl -fsSL "$url" -o "$tmp_dir/nvim.tar.gz"; then
+    tar -xzf "$tmp_dir/nvim.tar.gz" -C "$tmp_dir"
+    local extracted_dir; extracted_dir="$(find "$tmp_dir" -maxdepth 1 -mindepth 1 -type d -name 'nvim-linux*' | head -n1)"
+    if [[ -z "$extracted_dir" ]]; then
+      err "Não encontrei o diretório extraído do Neovim em $tmp_dir."
+    else
+      sudo rm -rf /opt/nvim
+      sudo mv "$extracted_dir" /opt/nvim
+      sudo ln -sf /opt/nvim/bin/nvim /usr/local/bin/nvim
+      ok "Neovim instalado: $(nvim --version | head -n1)"
+    fi
+  else
+    err "Falha ao baixar Neovim de $url"
+  fi
+  rm -rf "$tmp_dir"
+}
+
+install_ripgrep() {
+  if need_cmd rg; then
+    ok "ripgrep já instalado: $(rg --version | head -n1)"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    dry "Instalaria ripgrep via apt-get."
+    return 0
+  fi
+  apt_update_once
+  sudo apt-get install -y ripgrep
+}
+
+install_lua_language_server() {
+  if need_cmd lua-language-server; then
+    ok "lua-language-server já instalado."
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    dry "Instalaria lua-language-server via apt (se disponível) ou binário do GitHub em /opt/lua-language-server."
+    return 0
+  fi
+  apt_update_once
+  if sudo apt-get install -y lua-language-server 2>/dev/null; then
+    ok "lua-language-server instalado via apt."
+    return 0
+  fi
+  warn "Pacote apt de lua-language-server indisponível — baixando binário do GitHub..."
+  local asset_pattern
+  case "$ARCH_UNAME" in
+    x86_64)  asset_pattern='linux-x64\.tar\.gz$' ;;
+    aarch64) asset_pattern='linux-arm64\.tar\.gz$|linux-aarch64\.tar\.gz$' ;;
+    *) warn "Arquitetura $ARCH_UNAME não suportada para lua-language-server (LSP de Lua não vai funcionar)."; return 1 ;;
+  esac
+  local url; url="$(github_release_asset_url "LuaLS/lua-language-server" "$asset_pattern")"
+  if [[ -z "$url" ]]; then
+    warn "Não encontrei binário de lua-language-server para $ARCH_UNAME. LSP de Lua não vai funcionar até instalar manualmente."
+    return 1
+  fi
+  local tmp_dir; tmp_dir="$(mktemp -d)"
+  if curl -fsSL "$url" -o "$tmp_dir/lls.tar.gz"; then
+    sudo mkdir -p /opt/lua-language-server
+    sudo tar -xzf "$tmp_dir/lls.tar.gz" -C /opt/lua-language-server
+    sudo ln -sf /opt/lua-language-server/bin/lua-language-server /usr/local/bin/lua-language-server
+    ok "lua-language-server instalado."
+  else
+    warn "Falha ao baixar lua-language-server de $url"
+  fi
+  rm -rf "$tmp_dir"
+}
+
+install_stylua() {
+  if need_cmd stylua; then
+    ok "stylua já instalado: $(stylua --version)"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    dry "Baixaria o binário do stylua (formatter de Lua) do GitHub para /usr/local/bin/stylua."
+    return 0
+  fi
+  local asset_pattern
+  case "$ARCH_UNAME" in
+    x86_64)  asset_pattern='linux-x86_64\.zip$' ;;
+    aarch64) asset_pattern='linux-aarch64\.zip$' ;;
+    *) warn "Arquitetura $ARCH_UNAME não suportada para stylua (formatação de .lua cairá no fallback do LSP)."; return 1 ;;
+  esac
+  local url; url="$(github_release_asset_url "JohnnyMorganz/StyLua" "$asset_pattern")"
+  if [[ -z "$url" ]]; then
+    warn "Não encontrei binário de stylua para $ARCH_UNAME. Formatação de .lua cairá no fallback do LSP."
+    return 1
+  fi
+  local tmp_dir; tmp_dir="$(mktemp -d)"
+  if curl -fsSL "$url" -o "$tmp_dir/stylua.zip"; then
+    unzip -q "$tmp_dir/stylua.zip" -d "$tmp_dir"
+    sudo install -m 0755 "$tmp_dir/stylua" /usr/local/bin/stylua
+    ok "stylua instalado: $(stylua --version)"
+  else
+    warn "Falha ao baixar stylua de $url"
+  fi
+  rm -rf "$tmp_dir"
+}
+
+install_nvim_node_tools() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    dry "Instalaria Node.js 22+ (se necessário) e os pacotes npm globais: @typescript/native-preview (tsgo) e prettier."
+    return 0
+  fi
+  ensure_nodejs_22
+  if need_cmd tsgo; then
+    ok "tsgo já instalado."
+  else
+    log "Instalando tsgo (@typescript/native-preview)..."
+    sudo npm install -g @typescript/native-preview
+  fi
+  if need_cmd prettier; then
+    ok "prettier já instalado."
+  else
+    log "Instalando prettier..."
+    sudo npm install -g prettier
+  fi
+}
+
+install_neovim_config() {
+  local cfg_dir="$REAL_HOME/.config/nvim"
+  if [[ -d "$cfg_dir/.git" ]] && run_as_real_user "git -C '$cfg_dir' remote get-url origin" 2>/dev/null | grep -q "smnatale/nvim_native"; then
+    ok "Config do Neovim (nvim_native) já está em $cfg_dir."
+  else
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      dry "Clonaria https://github.com/smnatale/nvim_native para $cfg_dir (com backup de config existente, se houver) como usuário '$REAL_USER'."
+    else
+      if [[ -d "$cfg_dir" ]]; then
+        local backup="$cfg_dir.bak-$(date +%Y%m%d%H%M%S)"
+        warn "Config existente encontrada em $cfg_dir — movendo para $backup antes de instalar."
+        run_as_real_user "mv '$cfg_dir' '$backup'"
+      fi
+      run_as_real_user "mkdir -p '$(dirname "$cfg_dir")' && git clone --depth=1 https://github.com/smnatale/nvim_native.git '$cfg_dir'"
+      ok "Config do Neovim instalada em $cfg_dir."
+    fi
+  fi
+
+  # a config usa colorscheme "catppuccin", que não é nativo nem incluído no repo —
+  # instalado como pacote nativo do Vim (sem plugin manager). Ver NEOVIM.md.
+  local pack_dir="$cfg_dir/pack/colors/start/catppuccin.nvim"
+  if [[ -d "$pack_dir" ]]; then
+    ok "Colorscheme catppuccin já instalado (pacote nativo)."
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    dry "Clonaria catppuccin/nvim como pacote nativo em $pack_dir (a config referencia esse colorscheme mas não o inclui)."
+  else
+    run_as_real_user "mkdir -p '$(dirname "$pack_dir")' && git clone --depth=1 https://github.com/catppuccin/nvim.git '$pack_dir'"
+    ok "Colorscheme catppuccin instalado (pacote nativo, sem plugin manager)."
+  fi
+}
+
+install_neovim() {
+  install_neovim_bin
+  install_ripgrep
+  install_lua_language_server
+  install_stylua
+  install_nvim_node_tools
+  install_neovim_config
+  if [[ "$DRY_RUN" -ne 1 ]]; then
+    warn "Manual de uso e checklist pós-instalação: NEOVIM.md neste repositório."
+  fi
+}
+
 # ========================= Zsh + Oh My Zsh + Powerlevel10k =========================
 install_zsh_omz() {
   local zsh_custom="${ZSH_CUSTOM:-$REAL_HOME/.oh-my-zsh/custom}"
@@ -335,9 +541,10 @@ declare -A TOOL_LABEL=(
   [aws]="AWS CLI v2"
   [oc]="OpenShift CLI (oc)"
   [kimi]="Kimi Code CLI"
+  [neovim]="Neovim (config zero-plugin nvim_native)"
   [zsh]="Zsh + Oh My Zsh + Powerlevel10k"
 )
-TOOL_ORDER=(docker claude copilot az aws oc kimi zsh)
+TOOL_ORDER=(docker claude copilot az aws oc kimi neovim zsh)
 declare -A SELECTED
 
 select_tools() {
@@ -371,6 +578,7 @@ run_selected_installs() {
   [[ "${SELECTED[aws]:-0}"     -eq 1 ]] && install_aws_cli
   [[ "${SELECTED[oc]:-0}"      -eq 1 ]] && install_oc_cli
   [[ "${SELECTED[kimi]:-0}"    -eq 1 ]] && install_kimi_cli
+  [[ "${SELECTED[neovim]:-0}"  -eq 1 ]] && install_neovim
   [[ "${SELECTED[zsh]:-0}"     -eq 1 ]] && install_zsh_omz
 }
 
@@ -387,6 +595,7 @@ print_summary() {
       aws)     need_cmd aws     && echo "  AWS:     $(aws --version 2>/dev/null)"    || echo "  AWS:     não encontrado" ;;
       oc)      need_cmd oc      && echo "  oc:      $(oc version --client 2>/dev/null | head -n1)" || echo "  oc:      não encontrado" ;;
       kimi)    run_as_real_user "command -v kimi" >/dev/null 2>&1 && echo "  Kimi:    $(run_as_real_user "kimi --version" 2>/dev/null)" || echo "  Kimi:    não encontrado (reinicie o shell)" ;;
+      neovim)  need_cmd nvim    && echo "  Neovim:  $(nvim --version | head -n1) — config em ~/.config/nvim (ver NEOVIM.md)" || echo "  Neovim:  não encontrado" ;;
       zsh)     need_cmd zsh     && echo "  Zsh:     $(zsh --version)"               || echo "  Zsh:     não encontrado" ;;
     esac
   done
@@ -398,6 +607,7 @@ print_summary() {
   echo "  aws configure"
   echo "  oc login <URL_DO_CLUSTER>"
   echo "  kimi            (depois /login dentro do CLI)"
+  echo "  nvim            (manual e checklist pós-instalação em NEOVIM.md)"
   echo "  p10k configure  (dentro de um novo terminal zsh)"
 }
 
